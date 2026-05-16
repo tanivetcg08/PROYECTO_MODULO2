@@ -1,0 +1,991 @@
+---
+title: "Primera parte - R: Vuelos de NYC"
+format: 
+  html:
+    theme: litera
+    toc: true
+    toc-location: left
+    toc-depth: 2
+    page-layout: full
+    code-fold: true
+    code-summary: "Mostrar código"
+    df-print: paged
+execute:
+  warning: false
+  message: false
+---
+
+En este análisis se trabaja con una base de datos que reúne información como detalle de vuelos, información de aerolíneas, información de aeropuertos, datos sobre aeronaves como también datos meterológicos de vuelos que salieron de NYC. El enfoque inicial es identificar patrones para permitir entender mejor qué variables afectan o tienen una mayor relación.
+
+```{r}
+#| label: LIBRERIAS
+#| include: false
+
+library(DBI)
+library(RSQLite)
+library(dplyr)
+library(ggplot2)
+```
+
+```{r}
+#| label: BD
+#| include: false
+
+options(timeout = 300)  # 5 minutos
+
+url <- "https://raw.githubusercontent.com/EduardoSelimMM/20260101_LecturaLimpiezaDatos/main/proyecto/vuelos.db"
+temp <- tempfile(fileext = ".db")
+
+download.file(url, temp, mode = "wb", method = "libcurl")
+con <- DBI::dbConnect(RSQLite::SQLite(), temp)
+```
+
+Luego de hacer uso de las librerías y haber llamado la base de datos podemos dar una visualización general de su estructura.
+
+### Análisis de la información
+
+Observamos que se tienen cinco tablas:
+
+```{r}
+dbListTables(con)
+```
+
+```{r}
+#| label: nametablas
+#| include: false
+vuelos <- dbReadTable(con, "vuelos")
+aviones <- dbReadTable(con, "aviones")
+clima <-dbReadTable(con, "clima")
+aerolineas <- dbReadTable(con, "aerolineas")
+aeropuertos <- dbReadTable(con, "aeropuertos")
+```
+
+Comenzando un poco con la inspección de las tablas podemos identificar las conexión que se tiene, esto será utilizado más adelante considerando cada una de las preguntas que se contestarán.
+
+# Pregunta 1.
+
+### ¿Qué aerolínea tuvo el mayor retraso promedio en la salida en 2013?
+
+## Consulta con dplyr
+
+```{r}
+q1 <- vuelos %>%
+  filter(dep_delay > 0) %>%
+  group_by(carrier) %>%
+  summarise(promedio = mean(dep_delay, na.rm = TRUE)) %>%
+  left_join(aerolineas, by = "carrier") %>%
+  select(name, promedio) %>%
+  arrange(desc(promedio)) %>%
+  mutate(rank = row_number())
+
+q1[1:3,1:2]
+```
+
+## Consulta con SQL
+
+```{r}
+dbGetQuery(con, "
+SELECT 
+  ae.name,
+  AVG(v.dep_delay) AS promedio
+FROM vuelos AS v
+LEFT JOIN aerolineas AS ae
+  ON v.carrier = ae.carrier
+WHERE v.dep_delay > 0
+GROUP BY ae.name
+ORDER BY promedio DESC
+LIMIT 3
+")
+```
+
+*Gráfico:*
+
+```{r}
+ggplot(q1, aes(x = reorder(name, promedio), y = promedio)) +
+  geom_col(aes(fill = rank == 1)) +
+  coord_flip() +
+  geom_text(
+    data = q1 %>% filter(rank == 1),
+    aes(label = round(promedio, 1)),
+    hjust = -0.2,
+    size = 4,
+    fontface = "bold"
+  ) +
+  scale_fill_manual(values = c("TRUE" = "#E74C3C", "FALSE" = "grey85")) +
+  labs(
+    title = "Promedio de retraso por aerolínea",
+    x = "Aerolínea",
+    y = "Minutos de retraso"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+Podemos ver que de las dos consultas, obtenemos que la Aerolínea **SkyWest Airlines Inc.** es la aerolínea con una mayor cantidad de retrasos teniendo diferencias de *5.04721* con la aerolínea **Mesa Airlines Inc.** y *7.67021* con la aerolínea **ExpressJet Airlines Inc.**.
+
+# Pregunta 2.
+
+### ¿Qué día de la semana tuvo más vuelos retrasados en promedio?
+
+## Consulta con dplyr
+
+```{r}
+q2 <- vuelos %>%
+  mutate(
+    fecha = as.Date(paste(year, month, day, sep = "-")),
+    dia_semana = weekdays(fecha)
+        ) %>%
+  filter(dep_delay > 0) %>%
+  group_by(dia_semana) %>%
+  summarise(
+    promedio = mean(dep_delay, na.rm = TRUE),
+    total_retrasos = n()
+           ) %>%
+  arrange(desc(promedio))%>%
+  mutate(rank = row_number())
+
+q2[1:3,1:3]
+```
+
+## Consulta con SQL
+
+```{r}
+dbGetQuery(con, "
+SELECT 
+  CASE strftime('%w', date(printf('%04d-%02d-%02d', year, month, day)))
+    WHEN '0' THEN 'domingo'
+    WHEN '1' THEN 'lunes'
+    WHEN '2' THEN 'martes'
+    WHEN '3' THEN 'miercoles'
+    WHEN '4' THEN 'jueves'
+    WHEN '5' THEN 'viernes'
+    WHEN '6' THEN 'sabado'
+  END AS dia_semana,
+  AVG(dep_delay) AS promedio,
+  COUNT(*) AS total_retrasos
+FROM vuelos
+WHERE dep_delay > 0
+GROUP BY dia_semana
+ORDER BY promedio DESC
+LIMIT 3
+")
+```
+
+*Gráfico:*
+
+```{r}
+ggplot(q2, aes(x = reorder(dia_semana, promedio), y = promedio)) +
+  geom_col(aes(fill = rank == 1)) +
+  coord_flip() +
+  geom_text(
+    data = q2 %>% filter(rank==1),
+    aes(label = round(promedio,3)),
+    hjust = 0,
+    size = 3,
+    fontface= "bold"
+  )+
+  scale_fill_manual(values=c("TRUE"="#E74C3C", "FALSE" = "grey85"))+
+  labs(
+    title = "Promedio de retraso por día de la semana",
+    x = "Día de la semana",
+    y = "Minutos promedio de retraso"
+  )+
+ theme_minimal() +
+  theme(legend.position = "none")
+```
+
+Los lunes y jueves presentaron los mayores retrasos promedio. Esto podría estar relacionado con una mayor demanda de vuelos y una mayor congestión operativa en esos días, especialmente por viajes laborales y el incremento en el tráfico aéreo. Aunque los viernes también registraron un número considerable de retrasos, el promedio fue ligeramente menor en comparación con los otros días analizados.
+
+# Pregunta 3.
+
+### ¿Cuál es la distribución de los retrasos en la salida para cada aeropuerto?
+
+## Consulta con dplyr
+
+```{r}
+q3 <- vuelos %>%
+  filter(dep_delay > 0) %>%
+  group_by(origin) %>%
+  summarise(
+    promedio = mean(dep_delay, na.rm = TRUE),
+    mediana  = median(dep_delay, na.rm = TRUE),
+    minimo   = min(dep_delay, na.rm = TRUE),
+    maximo   = max(dep_delay, na.rm = TRUE),
+    p25      = quantile(dep_delay, 0.25, na.rm = TRUE),
+    p75      = quantile(dep_delay, 0.75, na.rm = TRUE),
+    desviacion = sd(dep_delay,na.rm = TRUE)
+  ) %>%
+  left_join(aeropuertos, by = c("origin" = "faa")) %>%
+  select(name, promedio, mediana, minimo, maximo, p25, p75,desviacion) %>%
+  arrange(desc(promedio))
+
+q3
+```
+
+## Consulta con SQL
+
+```{r}
+dbGetQuery(con, "
+SELECT
+    ae.name,
+    AVG(v.dep_delay) AS promedio,
+    MIN(v.dep_delay) AS minimo,
+    MAX(v.dep_delay) AS maximo,
+    PERCENT_RANK() OVER (ORDER BY AVG(v.dep_delay) DESC) AS ranking_percentil
+    
+FROM vuelos AS v
+JOIN aeropuertos AS ae
+    ON v.origin = ae.faa
+    
+WHERE v.dep_delay > 0
+
+GROUP BY ae.name
+
+ORDER BY promedio DESC
+")
+```
+
+Se analizó la distribución de los retrasos de salida para cada aeropuerto origen, calculando las medidas descriptivas como promedio, mínimo, máximo de retrasos.
+
+*Gráficos:*
+
+```{r}
+vuelos %>%
+  filter(dep_delay > 0) %>%
+  ggplot(aes(x = dep_delay)) +
+  geom_histogram(bins = 30) +
+  facet_wrap(~origin) +
+  labs(
+    title = "Distribución de retrasos de salida",
+    x = "Retraso (minutos)",
+    y = "Frecuencia"
+  )
+```
+
+```{r}
+vuelos %>%
+  filter(dep_delay > 0) %>%
+  ggplot(aes(x = origin, y = dep_delay)) +
+  geom_boxplot() +
+  labs(
+    title = "Distribución de los retrasos de salida por aeropuerto",
+    x = "Aeropuerto",
+    y = "Retraso de salida (minutos)"
+  )
+```
+
+El boxplot muestra que los tres aeropuertos presentan una fuere asimetría positiva, la mayoría d elos vueles tienen retrasos relativamente bajos, pero existen algunos casos extremos con retrasos muy elevados. Observandose valores atípicos en los 3 aeropuertos.
+
+La Guardia presenta el mayor retraso promedio, con aproximadamente 41.63 minutos, mientras que Newark Liberty Intl y John F Kennedy Intl registran promedios cercanos a 39 y 38 minutos, respectivamente. No obstante, John F Kennedy Intl presenta algunos de los retrasos máximos más elevados, alcanzando hasta 1301 minutos, lo que evidencia la existencia de casos extremos significativamente altos.
+
+Además, la diferencia entre la mediana y el promedio confirma la presencia de vuelos con retrasos atípicamente altos que incrementan el promedio general. Asimismo, La Guardia y John F Kennedy Intl presentan una mayor dispersión en los retrasos en comparación con Newark Liberty Intl, lo cual puede observarse tanto en el boxplot como en la amplitud de los valores registrados.
+
+Por otro lado, mediante la función PERCENT_RANK() se obtuvo la posición relativa de cada aeropuerto respecto al promedio de retrasos, permitiendo comparar el comportamiento de los aeropuertos dentro de la distribución general y confirmar cuáles presentan mayores niveles de retraso en relación con los demás. Los resultados muestran que La Guardia ocupa la posición con el promedio de retraso más alto dentro del conjunto analizado.
+
+# Pregunta 4.
+
+### ¿Qué proporción de vuelos se retrasaron más de 30 minutos?
+
+## Consulta con dplyr
+
+```{r}
+q4 <- vuelos %>%
+  filter(!is.na(dep_delay),dep_delay>0) %>%
+  summarise(
+    total = n(),
+    retrasados = sum(dep_delay > 30),
+    proporcion = (retrasados / total)*100
+  )
+
+q4
+
+```
+
+## Consulta con SQL
+
+```{r}
+dbGetQuery(con, "
+SELECT 
+    COUNT(*) AS total,
+    SUM(CASE WHEN dep_delay > 30 THEN 1 ELSE 0 END) AS retrasos,
+    (1.0*SUM(CASE WHEN dep_delay > 30 THEN 1 ELSE 0 END) / COUNT(*))*100 AS proporcion
+FROM vuelos
+WHERE dep_delay IS NOT NULL
+AND dep_delay>0
+")
+```
+
+Se calculó la proporción de velos encontrnado que aproximadamente el **37.60%** de los vuelos presentó retrasos superiores a 30 minutos.
+
+# Pregunta 5.
+
+### ¿Qué destinos tuvieron los mayores retrasos promedio en la llegada?
+
+## Consulta en dplyr
+
+```{r}
+q5 <- vuelos %>%
+  filter(arr_delay > 0) %>%
+  group_by(dest) %>%
+  summarise(
+    promedio = mean(arr_delay, na.rm = TRUE),
+    total_vuelos = n()
+  ) %>%
+  left_join(aeropuertos, by = c("dest" = "faa")) %>%
+  select(name, promedio, total_vuelos) %>%
+  arrange(desc(promedio))
+
+q5[1:3,1:3]
+```
+
+```{r}
+q5.1 <- vuelos %>%
+  filter(arr_delay > 0) %>%
+  group_by(dest) %>%
+  summarise(
+    promedio = mean(arr_delay, na.rm = TRUE),
+    total_vuelos = n(),
+    .groups = "drop"
+  ) %>%
+  filter(total_vuelos >= median(total_vuelos)) %>%
+  left_join(aeropuertos, by = c("dest" = "faa")) %>%
+  select(name, promedio, total_vuelos) %>%
+  arrange(desc(promedio))
+
+q5.1[1:3,1:3]
+```
+
+## Consulta con SQL
+
+```{r}
+dbGetQuery(con, "
+SELECT
+  a.name,
+  AVG(v.arr_delay) AS promedio,
+  COUNT(*) AS total_vuelos
+FROM vuelos AS v
+LEFT JOIN aeropuertos AS a
+  ON v.dest = a.faa
+WHERE v.arr_delay > 0
+GROUP BY v.dest, a.name
+ORDER BY promedio DESC
+LIMIT 3;
+           ")
+```
+
+Sin considerar la totalidad de los vuelos, los destinos con mayores retrasos son *Cherry Capital Airport*, *Tulsa Intl* y *Birmingham Intl*, con valores mayores a 60 minutos. Los mayores retrasos promedio se observan en ciertos aeropuertos con menor volumne de vuelos, teniendo que los valores extremos pueden tener un mayor impacto en el promedio cuento el tamaño de muestra es reducido.
+
+Por otro, tomando la mediana del total de vuelos tenemos que los destinos con mayores retrasos promedio en la llegada fueron *Richmond Intl* (53.33 min), *Cincinnati/Northern Kentucky Intl* (52.38 min) y *Baltimore/Washington Intl* (50.93 min).
+
+# Pregunta 6.
+
+### ¿Qué aerolíneas tuvieron el mayor número de vuelos desde NYC?
+
+## Consulta en dplyr
+
+```{r}
+q6 <- vuelos %>%
+  group_by(carrier) %>%
+  summarise(total = n(), .groups = "drop") %>%
+  mutate(proporcion = (total / sum(total))*100) %>%
+  left_join(aerolineas, by = "carrier") %>%
+  select(name, total, proporcion) %>%
+  arrange(desc(total))
+
+q6[1:3,1:3]
+```
+
+## Consulta con SQL
+
+```{r}
+dbGetQuery(con,"
+SELECT
+  ae.name,
+  COUNT(*) AS total,
+  (COUNT(*) * 1.0 / (
+    SELECT COUNT(*)
+    FROM vuelos
+  ))*100 AS proporcion
+FROM vuelos AS v
+LEFT JOIN aerolineas AS ae
+  ON v.carrier = ae.carrier
+GROUP BY v.carrier, ae.name
+ORDER BY total DESC;
+                   ")
+
+```
+
+Las aerolíneas con mayor número de vuelos desde NYC fueron *United Air Lines Inc.*, *JetBlue Airways* y *ExpressJet Airlines Inc.*, con 58,665, 54,635 y 54,173 vuelos respectivamente. Estas tres aerolíneas concentran una proporción importante del total de operaciones, lo que indica que dominan gran parte del tráfico aéreo de salida desde los aeropuertos de Nueva York.
+
+# Pregunta 7.
+
+### ¿Cómo varía el retraso de los vuelos según el fabricante de la aeronave?
+
+## Consulta con dplyr
+
+```{r}
+q7 <- vuelos %>%
+  left_join(aviones, by = "tailnum") %>%
+  filter(!is.na(manufacturer), arr_delay > 0) %>%
+  group_by(manufacturer) %>%
+  summarise(
+    promedio = mean(arr_delay, na.rm = TRUE),
+    mediana  = median(arr_delay, na.rm = TRUE),
+    total_vuelos = n()
+  ) %>%
+  arrange(desc(promedio))
+
+q7[1:5,1:4]
+```
+
+## Consulta con SQL
+
+```{r}
+dbGetQuery(con, "
+SELECT
+  a.manufacturer,
+  AVG(v.arr_delay) AS promedio,
+  COUNT(*) AS total_vuelos
+FROM vuelos AS v
+LEFT JOIN aviones AS a
+  ON v.tailnum = a.tailnum
+WHERE a.manufacturer IS NOT NULL
+  AND v.arr_delay > 0
+GROUP BY a.manufacturer
+ORDER BY promedio DESC
+LIMIT 5;
+")
+```
+
+# Pregunta 8.
+
+### ¿Los aviones más antiguos tienen más retrasos?
+
+## Consulta con dplyr
+
+```{r}
+q8 <- vuelos %>%
+  left_join(aviones, by = "tailnum") %>%
+  group_by(anio_fabricacion = year.y) %>%
+  summarise(retraso_prom_salida = mean(dep_delay, na.rm = TRUE)) %>%
+  filter(!is.na(anio_fabricacion)) %>%
+  arrange(anio_fabricacion)
+
+q8
+```
+
+## Consulta con SQL
+
+```{r}
+dbGetQuery(con, "
+SELECT a.year AS anio_fabricacion, AVG(v.dep_delay) AS retraso_prom_salida
+FROM vuelos v
+JOIN aviones a ON v.tailnum = a.tailnum
+WHERE a.year IS NOT NULL
+GROUP BY a.year
+ORDER BY a.year
+")
+
+```
+
+*Gráfico:*
+
+```{r}
+# Generamos una gráfica para una mejor visualización
+retrasos_por_anio <- vuelos %>%
+  left_join(aviones, by = "tailnum") %>%
+  group_by(anio_fabricacion = year.y) %>%
+  summarise(retraso_prom_salida = mean(dep_delay, na.rm = TRUE)) %>%
+  filter(!is.na(anio_fabricacion))
+
+ggplot(retrasos_por_anio, aes(x = anio_fabricacion, y = retraso_prom_salida)) +
+  geom_line(color = "steelblue", size = 1) +
+  geom_point(color = "darkblue", alpha = 0.5) +
+  geom_smooth(method = "loess", color = "red", se = FALSE) +
+  labs(title = "Relación entre Año de Fabricación y Retraso Promedio",
+       x = "Año de Fabricación del Avión",
+       y = "Retraso Promedio (minutos)") +
+  theme_minimal()
+```
+
+Al analizar los datos, no se observa una tendencia que indique que los aviones más antiguos se retrasen sustancialmente más. Los retrasos promedio fluctúan a lo largo de los años de fabricación, sugiriendo que factores como el clima, la aerolínea o la congestión del aeropuerto influyen más que el tiempo del avion.
+
+# Pregunta 9.
+
+### ¿Qué modelos de aviones se utilizan con mayor frecuencia en vuelos desde NYC?
+
+## Consulta con dplyr
+
+```{r}
+q9 <- vuelos %>%
+  left_join(aviones, by = "tailnum") %>%
+  group_by(model) %>%
+  summarise(frecuencia = n()) %>%
+  filter(!is.na(model)) %>%
+  arrange(desc(frecuencia)) %>%
+  head(10)
+
+q9
+```
+
+## Consulta con SQL
+
+```{r}
+dbGetQuery(con, "
+SELECT a.model, COUNT(*) AS frecuencia
+FROM vuelos v
+JOIN aviones a ON v.tailnum = a.tailnum
+WHERE a.model IS NOT NULL
+GROUP BY a.model
+ORDER BY frecuencia DESC
+LIMIT 10
+")
+```
+
+Los modelos preferidos para rutas desde NYC pertenecen predominantemente a A320-232 y EMB- 145LR. Esto responde a la alta demanda de vuelos comerciales de mediano y corto alcance operados por las principales aerolíneas
+
+# Pregunta 10.
+
+### ¿Cuál es la distancia promedio de vuelo por aerolínea?
+
+## Consulta con dplyr
+
+```{r}
+q10 <- vuelos %>%
+  group_by(carrier) %>%
+  summarise(distancia_promedio = mean(distance, na.rm = TRUE)) %>%
+  arrange(desc(distancia_promedio))
+
+q10
+```
+
+## Consulta con SQL
+
+```{r}
+dbGetQuery(con, "
+SELECT carrier, AVG(distance) AS distancia_promedio
+FROM vuelos
+GROUP BY carrier
+ORDER BY distancia_promedio DESC
+")
+```
+
+Aerolíneas como HA (Hawaiian Airlines)tienen la mayor distancia promedio de vuelo, dada la naturaleza de sus rutas (como el trayecto JFK-HNL). Por el contrario, aerolíneas regionales o de conexión manejan distancias promedio mucho más cortas.
+
+# Pregunta 11.
+
+### ¿Qué aeropuerto de NYC tuvo el mayor número de retrasos en la salida?
+
+## Consulta con dplyr
+
+```{r}
+q11 <- vuelos %>%
+  filter(dep_delay > 0) %>%
+  group_by(origin) %>%
+  summarise(num_vuelos_retrasados = n()) %>%
+  arrange(desc(num_vuelos_retrasados))
+
+q11
+```
+
+## Consulta con SQL
+
+```{r}
+dbGetQuery(con, "
+SELECT origin, COUNT(*) AS num_vuelos_retrasados
+FROM vuelos
+WHERE dep_delay > 0
+GROUP BY origin
+ORDER BY num_vuelos_retrasados DESC
+")
+```
+
+El aeropuerto de EWR (Newark) y JFK acumulan históricamente la mayor cantidad de vuelos con un retraso, lo cual tiene sentido dado su alto volumen de tráfico aéreo y configuración de pistas en relación al clima de la región.
+
+# Pregunta 12.
+
+### ¿Qué aeropuerto tuvo el menor tiempo promedio de taxi-out?
+
+## Consulta con dplyr
+
+```{r}
+q12 <- vuelos %>%
+  mutate(proxy_taxi_out = arr_delay - dep_delay) %>%
+  group_by(origin) %>%
+  summarise(tiempo_taxi_out_promedio = mean(proxy_taxi_out, na.rm = TRUE)) %>%
+  arrange(tiempo_taxi_out_promedio)
+
+q12
+```
+
+## Consulta con SQL
+
+```{r}
+dbGetQuery(con, "
+SELECT origin, AVG(arr_delay - dep_delay) AS tiempo_taxi_out_promedio
+FROM vuelos
+GROUP BY origin
+ORDER BY tiempo_taxi_out_promedio ASC
+")
+```
+
+Encontramos que aeropuertos como LGA o JFK logran un menor tiempo de taxi -out promedio en comparación con EWR, permitiendo recuperar minutos de vuelo con mayor eficacia tras dejar la puerta de embarque.
+
+# Pregunta 13.
+
+### ¿Qué porcentaje de vuelos que salen de cada aeropuerto de NYC fueron puntuales?
+
+## Consulta con dplyr
+
+```{r}
+q13 <- vuelos %>%
+  group_by(origin) %>%
+  summarise(pct_puntualidad = mean(dep_delay <= 0, na.rm = TRUE) * 100) %>%
+  arrange(desc(pct_puntualidad))
+
+q13
+```
+
+## Consulta con SQL
+
+```{r}
+dbGetQuery(con, "
+SELECT origin, 
+       AVG(CASE WHEN dep_delay <= 0 THEN 1.0 ELSE 0.0 END) * 100 AS pct_puntualidad
+FROM vuelos
+GROUP BY origin
+ORDER BY pct_puntualidad DESC
+")
+```
+
+LGA (LaGuardia) suele destacar con el porcentaje más alto de vuelos que logran salir con puntualidad, superando a aeropuertos con mayores problemas de saturación o clima, como EWR.
+
+# Pregunta 14.
+
+### ¿Qué aeropuertos de destino tienen el mayor retraso promedio en la llegada para vuelos desde NYC?
+
+## Consulta con dplyr
+
+```{r}
+#| message: false
+#| warning: false
+q14 <- vuelos %>%
+  filter(
+    !is.na(arr_delay),
+    origin %in% c("JFK", "LGA", "EWR"),
+    arr_delay>0
+  ) %>%
+  left_join(aeropuertos, by=c("dest"="faa")) %>%
+  group_by(dest,name) %>%
+  summarise(
+    promedio = mean(arr_delay),
+    total_vuelos = n()
+  ) %>%
+  arrange(desc(promedio))
+
+q14
+```
+
+```{r}
+#| message: false
+#| warning: false
+q14.1 <- vuelos %>%
+  filter(
+    !is.na(arr_delay),
+    origin %in% c("JFK", "LGA", "EWR"),
+    arr_delay>0
+  ) %>%
+  left_join(aeropuertos, by=c("dest"="faa")) %>%
+  group_by(dest,name) %>%
+  summarise(
+    promedio = mean(arr_delay),
+    total_vuelos = n()
+  ) %>%
+  filter(total_vuelos >= 100) %>%
+  arrange(desc(promedio))
+
+q14.1
+```
+
+## Consulta con SQL
+
+```{r}
+dbGetQuery(con, "
+SELECT
+    a.name,
+    AVG(v.arr_delay) AS avg_arr_delay,
+    COUNT(*) AS total_vuelos
+FROM vuelos v
+JOIN aeropuertos a
+    ON v.dest = a.faa
+WHERE v.arr_delay IS NOT NULL
+  AND v.origin IN ('JFK', 'LGA', 'EWR')
+  AND v.arr_delay>0
+GROUP BY a.name
+HAVING COUNT(*) >= 100
+ORDER BY avg_arr_delay DESC;
+")
+```
+
+Los aeropuertos de destino con mayor retraso promedio en la llegada de vuelos incluyen *Tulsa Intl (TUL)*, *Birmingham Intl (BHM)* y *McGhee Tyson (TYS)*, con promedios cercanos a los 60 minutos, considerando parte del análisis que el total de vuelos sea mayor a 100 ya que estaríamos distoricionando el análisis con destinos con pocos vuelos.
+
+# Pregunta 15.
+
+### ¿Cómo varían los retrasos en la salida según la hora del día en cada aeropuerto de NYC?
+
+## Consulta con dplyr
+
+```{r}
+#| message: false
+#| warning: false
+q15 <- vuelos %>%
+  filter(dep_delay > 0) %>%
+  group_by(origin, hour) %>%
+  summarise(
+    promedio_retraso = mean(dep_delay, na.rm = TRUE),
+    total_vuelos = n()
+  ) %>%
+  arrange(origin, hour)
+
+
+```
+
+## Consulta con SQL
+
+```{r}
+dbGetQuery(con, "
+SELECT
+  origin,
+  hour,
+  AVG(dep_delay) AS promedio_retraso,
+  COUNT(*) AS total_vuelos
+FROM vuelos
+WHERE dep_delay > 0
+GROUP BY origin, hour
+ORDER BY origin, hour;
+")
+```
+
+Los retrasos en la salida muestran un patrón claro de aumento conforme avanza el día en los tres aeropuertos de NYC (EWR, JFK y LGA). En general, los vuelos programados en las primeras horas de la mañana (5–7 am) presentan los menores retrasos promedio, mientras que los valores aumentan progresivamente a lo largo del día, teniendo los valores más altos por la noche.
+
+La Guardia (LGA) tiende a presentar los retrasos más altos en horas pico vespertinas, JFK muestra un crecimiento más gradual pero sostenido, con valores altos en la tarde-noche y EWR tiene un comportamiento similar, aunque ligeramente más estable en comparación con LGA.
+
+# Pregunta 16.
+
+### ¿Cuál es la correlación entre la velocidad del viento y los retrasos en la salida?
+
+## Consulta con dplyr
+
+```{r}
+q16 <- vuelos %>%
+  left_join(clima, by = c("origin", "time_hour"))%>%
+  filter(!is.na(wind_speed), !is.na(dep_delay), dep_delay>0)%>%
+  summarise(correlation = cor(wind_speed, dep_delay, use = "complete.obs"))
+
+q16
+```
+
+## Consulta con SQL
+
+```{r}
+dbGetQuery(con, "
+SELECT 
+  (
+    AVG(c.wind_speed * v.dep_delay) - 
+    AVG(c.wind_speed) * AVG(v.dep_delay)
+  ) /
+  (
+    SQRT(AVG(c.wind_speed * c.wind_speed) - AVG(c.wind_speed) * AVG(c.wind_speed)) *
+    SQRT(AVG(v.dep_delay * v.dep_delay) - AVG(v.dep_delay) * AVG(v.dep_delay))
+  ) AS correlation
+FROM vuelos AS v
+JOIN clima AS c
+  ON v.origin = c.origin
+ AND v.time_hour = c.time_hour
+WHERE c.wind_speed IS NOT NULL
+  AND v.dep_delay IS NOT NULL
+  AND v.dep_delay>0;
+")
+```
+
+El valor de la correlación entre la velocidad del viento y los retrasos en la salida es de *0.0279*, lo que indica una relación positiva prácticamente nula. Esto nos da que la velocidad del viento no tiene un impacto relevante sobre los retrasos en la salida de los vuelos desde NYC.
+
+# Pregunta 17.
+
+### ¿Los vuelos experimentan más retrasos en días con lluvias intensas?
+
+## Consulta con dplyr
+
+```{r}
+q17 <- vuelos %>%
+  left_join(clima, by = c("origin", "time_hour")) %>%
+  filter(!is.na(precip), !is.na(dep_delay), !is.na(arr_delay),dep_delay > 0,
+    arr_delay > 0) %>%
+  mutate(lluvia_intensa = precip >= 0.5) %>%
+  group_by(lluvia_intensa) %>%
+  summarise(
+    promedio_dep = mean(dep_delay, na.rm = TRUE),
+    promedio_arr = mean(arr_delay, na.rm = TRUE))
+
+q17
+```
+
+## Consulta con SQL
+
+```{r}
+dbGetQuery(con,"
+SELECT
+  CASE
+    WHEN c.precip >= 0.5 THEN 'lluvia_intensa'
+    ELSE 'sin_lluvia_intensa'
+  END AS lluvia_intensa,
+
+  AVG(v.dep_delay) AS promedio_dep,
+  AVG(v.arr_delay) AS promedio_arr
+
+FROM vuelos AS v
+JOIN clima AS c
+  ON v.origin = c.origin
+ AND v.time_hour = c.time_hour
+
+WHERE c.precip IS NOT NULL
+  AND v.dep_delay > 0
+  AND v.arr_delay > 0
+
+GROUP BY lluvia_intensa;     
+           ")
+```
+
+Los resultados muestran que los vuelos presentan retrasos significativamente mayores en días con lluvias intensas. Cuando no hay lluvia el retraso promedio de salida es de 51.4 minutos, mientras que en condiciones de lluvia intensa aumenta a 80.7 minutos. De manera similar, el retrado promedio también incrementa de 52.5 a 82.8 minutos bajo lluvia intensa.
+
+Esto indica que las condiciones meteorológicas adversas tienen un impacto significativo en la puntualidad de los vuelos, afectando en las salidas y llegadas.
+
+# Pregunta 18.
+
+### ¿Cómo afecta la temperatura a los retrasos de los vuelos?
+
+## Consulta con dplyr
+
+```{r}
+q18 <- vuelos %>%
+  inner_join(clima, by = c("origin", "time_hour")) %>%
+  filter(!is.na(temp), !is.na(dep_delay),dep_delay > 0) %>%
+  summarise(
+    corr_temp_dep = cor(temp, dep_delay, use = "complete.obs")
+  )
+q18
+```
+
+## Consulta con SQL
+
+```{r}
+dbGetQuery(con, "
+SELECT
+  (AVG(c.temp * v.dep_delay) - AVG(c.temp) * AVG(v.dep_delay)) /
+  NULLIF(
+    SQRT(AVG(c.temp * c.temp) - AVG(c.temp) * AVG(c.temp)) *
+    SQRT(AVG(v.dep_delay * v.dep_delay) - AVG(v.dep_delay) * AVG(v.dep_delay)),
+    0
+  ) AS corr_temp_dep
+  
+FROM vuelos AS v
+JOIN clima AS c
+  ON v.origin = c.origin
+ AND v.time_hour = c.time_hour
+
+WHERE v.dep_delay > 0
+  AND c.temp IS NOT NULL;          
+           ")
+```
+
+La correlación entre la temperatura y los retrasos de los vuelos es de *0.0689*, lo que indica una relación positiva muy débil. Es decir, no se tiene un impacto relevante en los retrasos de los vuelos desde NYC.
+
+# Pregunta 19.
+
+### ¿Cómo afectan los niveles de visibilidad a los retrasos en la llegada?
+
+## Consulta con dplyr
+
+```{r}
+q19 <- vuelos %>%
+  left_join(clima, by = c("origin", "time_hour")) %>%
+  filter(!is.na(visib), !is.na(arr_delay),arr_delay>0) %>%
+  summarise(
+    corr_visib_arr = cor(visib, arr_delay, use = "complete.obs")
+  )
+q19
+```
+
+## Consulta con SQL
+
+```{r}
+dbGetQuery(con,"
+SELECT
+  (AVG(c.visib * v.arr_delay) - AVG(c.visib) * AVG(v.arr_delay)) /
+  NULLIF(
+    SQRT(AVG(c.visib * c.visib) - AVG(c.visib) * AVG(c.visib)) *
+    SQRT(AVG(v.arr_delay * v.arr_delay) - AVG(v.arr_delay) * AVG(v.arr_delay)),
+    0
+  ) AS corr_visib_arr
+FROM vuelos AS v
+JOIN clima AS c
+  ON v.origin = c.origin
+ AND v.time_hour = c.time_hour
+WHERE v.arr_delay IS NOT NULL
+  AND c.visib IS NOT NULL
+  AND v.arr_delay>0;          
+           ")
+```
+
+La correlación entre la visibilidad y los retrasos en la llegada es de *-0.1042*, lo que indica una relación negativa débil. Esto sugiere que, en general, cuando la visibilidad disminuye, los retrasos tienden a aumentar ligeramente, aunque la relación no es fuerte.
+
+Esto sugiere que condiciones de menor visibilidad pueden contribuir ligeramente a mayores retrasos, aunque su impacto no es significativo en comparación con otros factores meteorológicos u operativos.
+
+# Pregunta 20.
+
+### ¿La alta humedad se relaciona de alguna manera con los tiempos de taxi-out más largos?
+
+## Consulta con dplyr
+
+```{r}
+q20 <- vuelos %>%
+  mutate(proxy_taxi_out = arr_delay - dep_delay) %>%
+  left_join(clima, by = c("origin", "time_hour")) %>%
+  filter(!is.na(humid), !is.na(dep_delay), !is.na(arr_delay)) %>%
+  
+  summarise(
+    corr_humid_dep = cor(humid, proxy_taxi_out, use = "complete.obs")
+  )
+q20
+```
+
+## Consulta con SQL
+
+```{r}
+dbGetQuery(con, "
+SELECT
+  (
+    AVG(c.humid * (v.arr_delay - v.dep_delay)) -
+    AVG(c.humid) * AVG(v.arr_delay - v.dep_delay)
+  ) /
+  NULLIF(
+    SQRT(AVG(c.humid * c.humid) - AVG(c.humid) * AVG(c.humid)) *
+    SQRT(
+      AVG((v.arr_delay - v.dep_delay) * (v.arr_delay - v.dep_delay)) -
+      AVG(v.arr_delay - v.dep_delay) * AVG(v.arr_delay - v.dep_delay)
+    ),
+    0
+  ) AS corr_humid_taxi
+
+FROM vuelos AS v
+JOIN clima AS c
+  ON v.origin = c.origin
+ AND v.time_hour = c.time_hour
+
+WHERE c.humid IS NOT NULL
+  AND v.arr_delay IS NOT NULL
+  AND v.dep_delay IS NOT NULL;
+")
+```
+
+El valor obtenido *0.08983275*, nos indica una relación positiva muy debíl entre la humedad y los tiempos de taxi_out. En general, niveles más altos de humedad no aparecen estar asociados con incrementos importantes en los tiempos antes del despegue, esto es que la alta humedad no muestra una relación relevante con los tiempos de taxi-out.
